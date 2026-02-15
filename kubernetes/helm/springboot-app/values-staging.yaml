@@ -1,0 +1,29 @@
+# Staging environment overrides
+global:
+  environment: staging
+
+deployment:
+  replicaCount: 2
+
+image:
+  tag: "staging-latest"
+
+service:
+  type: LoadBalancer
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "staging"

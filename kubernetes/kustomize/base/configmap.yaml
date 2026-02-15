@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  labels:
+    app: springboot-app
+data:
+  # Application settings
+  SPRING_APPLICATION_NAME: "springboot-app"
+  SPRING_JPA_HIBERNATE_DDL_AUTO: "validate"
+  SPRING_JPA_SHOW_SQL: "false"
+
+  # Logging configuration
+  LOGGING_LEVEL_ROOT: "INFO"
+  LOGGING_LEVEL_COM_COMPANY: "DEBUG"
+
+  # Actuator endpoints
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: "health,info,metrics,prometheus"
+  MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: "always"
+
+  # Performance tuning
+  JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"

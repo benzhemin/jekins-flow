@@ -1,0 +1,26 @@
+/*
+ * Infrastructure Module Build Configuration
+ * This module contains persistence layer, database configuration, and external integrations
+ * It depends on the domain module (but domain doesn't depend on it)
+ */
+
+plugins {
+    id("java-library-conventions")
+}
+
+description = "Persistence layer and infrastructure concerns"
+
+dependencies {
+    // Depend on domain module
+    implementation(project(":application:domain"))
+
+    // Spring Boot starters for persistence
+    implementation(libs.`spring-boot-starter-data-jpa`)
+
+    // Database
+    runtimeOnly(libs.`h2-database`)
+
+    // Lombok
+    implementation(libs.lombok)
+    annotationProcessor(libs.lombok)
+}

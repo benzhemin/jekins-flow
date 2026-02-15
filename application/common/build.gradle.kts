@@ -1,0 +1,18 @@
+/*
+ * Common Module Build Configuration
+ * This module contains shared DTOs, utilities, and exceptions used across all other modules
+ * It has no external dependencies to prevent circular dependency issues
+ */
+
+plugins {
+    id("java-library-conventions")
+}
+
+description = "Shared utilities, DTOs, and exceptions for the application"
+
+dependencies {
+    // Common utilities and annotations
+    api(libs.`spring-boot-starter-validation`)
+    api(libs.lombok)
+    annotationProcessor(libs.lombok)
+}

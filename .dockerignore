@@ -1,0 +1,49 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# IDE and editor files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Gradle
+.gradle
+build/
+*.jar
+*.war
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+
+# Documentation
+docs/
+README.md
+*.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Test coverage
+coverage/
+*.gcov
+
+# Node (if any frontend)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# OS files
+.env
+.env.local
+*.log
+*.tmp

@@ -1,0 +1,361 @@
+/*
+ * Jenkins Build Pipeline - Jenkinsfile.build
+ *
+ * This pipeline handles Docker image creation, security scanning, and registry push.
+ * It runs after the CI pipeline completes successfully.
+ *
+ * Stages:
+ * 1. Prepare: Download CI artifacts, determine version
+ * 2. Docker Build: Build Docker image
+ * 3. Container Scan: Scan image for vulnerabilities using Trivy
+ * 4. Quality Gate: Fail if critical/high vulnerabilities found
+ * 5. Tag & Push: Tag image with version and push to registry
+ *
+ * Trigger: Manual or after successful CI pipeline
+ * Duration: ~5-10 minutes
+ */
+
+pipeline {
+    agent {
+        // Use Docker agent to run Docker-in-Docker (DinD)
+        docker {
+            image 'docker:24-dind'
+            args '--privileged --cpus=4 --memory=4g'
+        }
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    parameters {
+        // Allow manual override of version
+        string(
+            name: 'BUILD_VERSION',
+            defaultValue: 'latest',
+            description: 'Docker image version tag'
+        )
+        // Allow dry-run mode (no push)
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Perform dry-run (do not push to registry)'
+        )
+    }
+
+    environment {
+        // Docker registry configuration
+        DOCKER_REGISTRY = credentials('docker-registry-url')
+        DOCKER_USERNAME = credentials('docker-username')
+        DOCKER_PASSWORD = credentials('docker-password')
+
+        // Image naming
+        IMAGE_NAME = "springboot-app"
+        IMAGE_REPO = "${DOCKER_REGISTRY}/${IMAGE_NAME}"
+
+        // Build information
+        BUILD_TIMESTAMP = sh(script: "date -u +'%Y%m%d-%H%M%S'", returnStdout: true).trim()
+        GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
+    }
+
+    stages {
+        /*
+         * Stage 1: Prepare
+         * Set up build environment and determine version
+         */
+        stage('Prepare') {
+            steps {
+                script {
+                    echo "====== Preparing build environment ======"
+
+                    // Download artifacts from CI pipeline
+                    copyArtifacts(
+                        projectName: 'springboot-cicd-platform-ci',
+                        selector: lastSuccessful(),
+                        target: 'ci-artifacts/',
+                        optional: true
+                    )
+
+                    // Determine version
+                    if (params.BUILD_VERSION == 'latest') {
+                        // Use git tag if available, otherwise use build number
+                        def gitTag = sh(script: "git describe --tags --abbrev=0 2>/dev/null || echo 'v0.0.0'", returnStdout: true).trim()
+                        env.IMAGE_TAG = gitTag.replaceAll('^v', '') // Remove 'v' prefix if present
+                    } else {
+                        env.IMAGE_TAG = params.BUILD_VERSION
+                    }
+
+                    echo "Image will be built with:"
+                    echo "  Repository: ${IMAGE_REPO}"
+                    echo "  Tag: ${IMAGE_TAG}"
+                    echo "  Full Name: ${IMAGE_REPO}:${IMAGE_TAG}"
+                    echo "  Also tagged as: ${IMAGE_REPO}:${BUILD_TIMESTAMP}"
+                    echo "  Git Commit: ${GIT_COMMIT_SHORT}"
+                }
+            }
+        }
+
+        /*
+         * Stage 2: Build Docker Image
+         * Build multi-stage Docker image from Dockerfile
+         */
+        stage('Docker Build') {
+            steps {
+                script {
+                    echo "====== Building Docker image ======"
+                    try {
+                        sh '''
+                            # Ensure we're in the right directory
+                            pwd
+                            ls -la
+
+                            # Build the Docker image
+                            docker build \
+                                --file application/docker/Dockerfile \
+                                --tag ${IMAGE_REPO}:${IMAGE_TAG} \
+                                --tag ${IMAGE_REPO}:${BUILD_TIMESTAMP} \
+                                --tag ${IMAGE_REPO}:latest \
+                                --label "git.commit=${GIT_COMMIT_SHORT}" \
+                                --label "build.number=${BUILD_NUMBER}" \
+                                --label "build.timestamp=${BUILD_TIMESTAMP}" \
+                                --build-arg BUILD_VERSION=${IMAGE_TAG} \
+                                .
+
+                            # Display image information
+                            echo ""
+                            echo "Docker images created:"
+                            docker images | grep ${IMAGE_NAME}
+
+                            # Get image size
+                            docker inspect --format='{{.Size}}' ${IMAGE_REPO}:${IMAGE_TAG} | numfmt --to=iec
+                        '''
+                    } catch (Exception e) {
+                        echo "Docker build failed: ${e.message}"
+                        error("Failed to build Docker image")
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 3: Container Security Scan
+         * Scan Docker image for vulnerabilities using Trivy
+         */
+        stage('Container Scan') {
+            steps {
+                script {
+                    echo "====== Scanning Docker image with Trivy ======"
+                    try {
+                        sh '''
+                            # Install trivy if not available
+                            if ! command -v trivy &> /dev/null; then
+                                echo "Installing Trivy..."
+                                wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -
+                                echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee -a /etc/apt/sources.list.d/trivy.list
+                                apt-get update && apt-get install -y trivy
+                            fi
+
+                            # Run Trivy scan
+                            trivy image \
+                                --severity CRITICAL,HIGH,MEDIUM \
+                                --format json \
+                                --output trivy-report.json \
+                                ${IMAGE_REPO}:${IMAGE_TAG}
+
+                            # Also create human-readable report
+                            trivy image \
+                                --severity CRITICAL,HIGH,MEDIUM \
+                                --format table \
+                                --output trivy-report.txt \
+                                ${IMAGE_REPO}:${IMAGE_TAG}
+
+                            # Display summary
+                            echo ""
+                            echo "===== Trivy Scan Summary ====="
+                            head -50 trivy-report.txt
+
+                            # Count vulnerabilities
+                            CRITICAL_COUNT=$(grep -c '"Severity": "CRITICAL"' trivy-report.json || echo "0")
+                            HIGH_COUNT=$(grep -c '"Severity": "HIGH"' trivy-report.json || echo "0")
+
+                            echo ""
+                            echo "Critical Vulnerabilities: $CRITICAL_COUNT"
+                            echo "High Vulnerabilities: $HIGH_COUNT"
+                        '''
+                    } catch (Exception e) {
+                        echo "Warning: Trivy scan encountered an error: ${e.message}"
+                        // Continue even if trivy fails, but don't push
+                    }
+                }
+            }
+            post {
+                always {
+                    // Archive Trivy reports
+                    archiveArtifacts artifacts: 'trivy-report.*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        /*
+         * Stage 4: Quality Gate
+         * Ensure image meets security requirements
+         */
+        stage('Quality Gate') {
+            steps {
+                script {
+                    echo "====== Checking container security quality gate ======"
+
+                    // Parse Trivy results and fail if critical vulnerabilities found
+                    sh '''
+                        if [ -f trivy-report.json ]; then
+                            # Count critical vulnerabilities
+                            CRITICAL=$(grep -c '"Severity": "CRITICAL"' trivy-report.json || echo "0")
+
+                            if [ "$CRITICAL" -gt 0 ]; then
+                                echo "FAILED: Found $CRITICAL critical vulnerabilities!"
+                                exit 1
+                            fi
+
+                            echo "Quality gate PASSED: No critical vulnerabilities found"
+                        else
+                            echo "Warning: Trivy report not found, skipping quality gate"
+                        fi
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 5: Tag and Push
+         * Push Docker image to registry
+         */
+        stage('Tag & Push') {
+            when {
+                expression {
+                    // Only push if not in dry-run mode
+                    return !params.DRY_RUN
+                }
+            }
+            steps {
+                script {
+                    echo "====== Pushing image to Docker registry ======"
+                    try {
+                        sh '''
+                            # Login to Docker registry
+                            echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin ${DOCKER_REGISTRY}
+
+                            # Push all tags
+                            docker push ${IMAGE_REPO}:${IMAGE_TAG}
+                            docker push ${IMAGE_REPO}:${BUILD_TIMESTAMP}
+                            docker push ${IMAGE_REPO}:latest
+
+                            # Logout
+                            docker logout ${DOCKER_REGISTRY}
+
+                            echo ""
+                            echo "Images pushed successfully:"
+                            echo "  - ${IMAGE_REPO}:${IMAGE_TAG}"
+                            echo "  - ${IMAGE_REPO}:${BUILD_TIMESTAMP}"
+                            echo "  - ${IMAGE_REPO}:latest"
+                        '''
+                    } catch (Exception e) {
+                        echo "Failed to push image: ${e.message}"
+                        error("Docker push failed")
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 6: Summary
+         * Display build summary
+         */
+        stage('Summary') {
+            steps {
+                script {
+                    echo "====== Build Summary ======"
+                    sh '''
+                        echo "Docker Image Build Complete"
+                        echo "============================"
+                        echo "Repository: ${IMAGE_REPO}"
+                        echo "Version Tag: ${IMAGE_TAG}"
+                        echo "Timestamp Tag: ${BUILD_TIMESTAMP}"
+                        echo "Git Commit: ${GIT_COMMIT_SHORT}"
+                        echo "Build Number: ${BUILD_NUMBER}"
+
+                        if [ "${DRY_RUN}" == "true" ]; then
+                            echo ""
+                            echo "[DRY RUN MODE] - Image was NOT pushed to registry"
+                        fi
+
+                        echo ""
+                        echo "Next: Deploy pipeline can now pull and deploy this image"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "====== Cleanup ======"
+
+                // Clean up Docker system
+                sh '''
+                    # Remove dangling images
+                    docker image prune -f --filter "dangling=true" || true
+
+                    # Display disk usage
+                    docker system df || true
+                '''
+            }
+        }
+
+        success {
+            script {
+                echo "====== Build Pipeline SUCCESS ======"
+                emailext(
+                    subject: "Docker Build Success: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    body: """
+                        Docker image built and pushed successfully!
+
+                        Job: ${env.JOB_NAME}
+                        Build Number: ${env.BUILD_NUMBER}
+                        Build URL: ${env.BUILD_URL}
+
+                        Image: ${IMAGE_REPO}:${IMAGE_TAG}
+                        Git Commit: ${GIT_COMMIT_SHORT}
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+
+        failure {
+            script {
+                echo "====== Build Pipeline FAILURE ======"
+                emailext(
+                    subject: "Docker Build Failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    body: """
+                        Docker image build failed!
+
+                        Job: ${env.JOB_NAME}
+                        Build Number: ${env.BUILD_NUMBER}
+                        Build URL: ${env.BUILD_URL}
+
+                        Please check the build log for details.
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+    }
+}

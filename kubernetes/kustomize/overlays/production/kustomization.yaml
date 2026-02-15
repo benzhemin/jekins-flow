@@ -1,0 +1,38 @@
+# Production Environment Overlay
+#
+# Patches the base Kustomization with production-specific values:
+# - 3+ replicas for high availability
+# - High resource limits and requests
+# - Load balancer service
+# - Strict security policies
+# - Monitoring and alerting enabled
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: production
+
+bases:
+  - ../../base
+
+commonLabels:
+  environment: production
+
+patchesStrategicMerge:
+  - deployment-patch.yaml
+  - service-patch.yaml
+
+images:
+  - name: springboot-app
+    newTag: latest
+
+replicas:
+  - name: springboot-app
+    count: 3
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - SPRING_PROFILES_ACTIVE=production
+      - LOGGING_LEVEL_COM_COMPANY=WARN

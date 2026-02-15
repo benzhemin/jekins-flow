@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot-app
+  labels:
+    app: springboot-app
+    component: api
+spec:
+  # Service type - can be overridden in overlays
+  type: ClusterIP
+
+  # Port configuration
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+
+  # Pod selector
+  selector:
+    app: springboot-app
+    component: api
+
+  # Session affinity for sticky sessions
+  sessionAffinity: None
+
+  # Service discovery
+  publishNotReadyAddresses: false

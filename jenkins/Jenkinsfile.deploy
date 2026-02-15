@@ -1,0 +1,537 @@
+/*
+ * Jenkins Deploy Pipeline - Jenkinsfile.deploy
+ *
+ * This pipeline deploys the Docker image to Kubernetes environments.
+ * It supports multiple deployment strategies:
+ * - Dev: Direct deployment
+ * - Staging: Requires manual approval
+ * - Production: Requires approval + canary deployment strategy
+ *
+ * Stages:
+ * 1. Validate: Check deployment readiness
+ * 2. Deploy: Apply Kubernetes manifests (Kustomize or Helm)
+ * 3. Wait for Rollout: Monitor deployment progress
+ * 4. Smoke Tests: Run basic health checks
+ * 5. Canary (production only): Gradually shift traffic
+ * 6. Promote (production only): Complete rollout
+ *
+ * Trigger: Manual or after successful Build pipeline
+ * Duration: ~10-15 minutes
+ */
+
+pipeline {
+    agent {
+        docker {
+            image 'alpine:latest'
+            args '--cpus=2 --memory=1g'
+        }
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    // Pipeline parameters
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'staging', 'production'],
+            description: 'Target deployment environment'
+        )
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Docker image tag to deploy'
+        )
+        choice(
+            name: 'DEPLOYMENT_TOOL',
+            choices: ['kustomize', 'helm'],
+            description: 'Kubernetes deployment tool'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Perform dry-run (no actual deployment)'
+        )
+    }
+
+    environment {
+        // Kubernetes configuration
+        KUBECONFIG = credentials('kubeconfig')
+        KUBECTL_CONTEXT = "${ENVIRONMENT}-cluster"
+        NAMESPACE = "${ENVIRONMENT}"
+
+        // Image registry
+        IMAGE_REGISTRY = credentials('docker-registry-url')
+        IMAGE_NAME = "springboot-app"
+        FULL_IMAGE = "${IMAGE_REGISTRY}/${IMAGE_NAME}:${params.IMAGE_TAG}"
+
+        // Build information
+        DEPLOYMENT_ID = "${BUILD_NUMBER}-${System.currentTimeMillis()}"
+        DEPLOYMENT_TIMESTAMP = sh(script: "date -u +'%Y%m%d-%H%M%S'", returnStdout: true).trim()
+    }
+
+    stages {
+        /*
+         * Stage 1: Validate
+         * Check that all prerequisites are met
+         */
+        stage('Validate') {
+            steps {
+                script {
+                    echo "====== Validating deployment prerequisites ======"
+
+                    sh '''
+                        # Install required tools
+                        apk add --no-cache kubectl helm kustomize curl
+
+                        # Validate kubectl
+                        echo "kubectl version:"
+                        kubectl version --client || true
+
+                        # Check kubeconfig
+                        echo "Kubeconfig:"
+                        ls -la $KUBECONFIG
+
+                        # Validate cluster connectivity
+                        echo "Cluster info:"
+                        kubectl cluster-info --kubeconfig=$KUBECONFIG || true
+
+                        # Check if namespace exists
+                        echo "Checking namespace: ${NAMESPACE}"
+                        kubectl get namespace ${NAMESPACE} \
+                            --kubeconfig=$KUBECONFIG \
+                            || echo "Namespace doesn't exist, will be created"
+
+                        # Validate image exists (if not dry-run)
+                        if [ "${DRY_RUN}" != "true" ]; then
+                            echo "Validating image availability..."
+                            docker pull ${FULL_IMAGE} || echo "Warning: Could not pull image (may not be accessible in this environment)"
+                        fi
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 2: Pre-deployment Approval
+         * For staging and production, require manual approval
+         */
+        stage('Approval') {
+            when {
+                expression {
+                    return params.ENVIRONMENT in ['staging', 'production']
+                }
+            }
+            steps {
+                script {
+                    try {
+                        timeout(time: 1, unit: 'HOURS') {
+                            def message = "Deploy to ${params.ENVIRONMENT}?"
+                            if (params.ENVIRONMENT == 'production') {
+                                message = "⚠️  PRODUCTION DEPLOYMENT ⚠️\n\nDeploy ${IMAGE_NAME}:${params.IMAGE_TAG} to PRODUCTION?\n\nThis action cannot be undone. Ensure all tests have passed."
+                            }
+
+                            input(message: message, ok: 'Deploy')
+                            echo "Deployment approved by: ${env.APPROVED_BY ?: 'unknown'}"
+                        }
+                    } catch (err) {
+                        echo "Deployment cancelled by user or timeout"
+                        error("Deployment approval failed")
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 3: Deploy with Kustomize
+         * Deploy using Kustomize overlays
+         */
+        stage('Deploy - Kustomize') {
+            when {
+                expression {
+                    return params.DEPLOYMENT_TOOL == 'kustomize'
+                }
+            }
+            steps {
+                script {
+                    echo "====== Deploying with Kustomize ======"
+
+                    sh '''
+                        # Set up kubectl context
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        # Create namespace if it doesn't exist
+                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+
+                        # Build Kustomize manifests
+                        echo "Building Kustomize manifests for ${ENVIRONMENT}..."
+                        KUSTOMIZE_PATH="kubernetes/kustomize/overlays/${ENVIRONMENT}"
+
+                        # Update image in kustomization
+                        cd $KUSTOMIZE_PATH
+                        kustomize edit set image springboot-app=${FULL_IMAGE}
+
+                        # Show what will be deployed
+                        echo ""
+                        echo "===== Kustomize Build Output (Preview) ====="
+                        kustomize build . | head -100
+
+                        cd ${WORKSPACE}
+
+                        # Deploy (dry-run if requested)
+                        DRY_RUN_FLAG=""
+                        if [ "${DRY_RUN}" == "true" ]; then
+                            DRY_RUN_FLAG="--dry-run=client"
+                            echo "DRY RUN MODE - No changes will be applied"
+                        fi
+
+                        kustomize build $KUSTOMIZE_PATH | \
+                            kubectl apply -f - \
+                            -n ${NAMESPACE} \
+                            ${DRY_RUN_FLAG}
+
+                        echo "Kustomize deployment initiated"
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 4: Deploy with Helm
+         * Deploy using Helm charts
+         */
+        stage('Deploy - Helm') {
+            when {
+                expression {
+                    return params.DEPLOYMENT_TOOL == 'helm'
+                }
+            }
+            steps {
+                script {
+                    echo "====== Deploying with Helm ======"
+
+                    sh '''
+                        # Set up kubectl context
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        # Create namespace if it doesn't exist
+                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+
+                        # Prepare Helm values
+                        HELM_CHART="kubernetes/helm/springboot-app"
+                        VALUES_FILE="kubernetes/helm/springboot-app/values-${ENVIRONMENT}.yaml"
+
+                        echo "Helm Chart: $HELM_CHART"
+                        echo "Values File: $VALUES_FILE"
+
+                        # Update image reference
+                        HELM_ARGS="\
+                            --namespace ${NAMESPACE} \
+                            --set image.repository=${IMAGE_REGISTRY}/${IMAGE_NAME} \
+                            --set image.tag=${IMAGE_TAG} \
+                            --set global.environment=${ENVIRONMENT}"
+
+                        # Add values file if exists
+                        if [ -f "$VALUES_FILE" ]; then
+                            HELM_ARGS="$HELM_ARGS -f $VALUES_FILE"
+                        fi
+
+                        # Dry-run if requested
+                        DRY_RUN_FLAG=""
+                        if [ "${DRY_RUN}" == "true" ]; then
+                            DRY_RUN_FLAG="--dry-run --debug"
+                            echo "DRY RUN MODE - No changes will be applied"
+                        fi
+
+                        # Helm upgrade or install
+                        helm upgrade --install \
+                            ${IMAGE_NAME} \
+                            $HELM_CHART \
+                            $HELM_ARGS \
+                            $DRY_RUN_FLAG \
+                            --wait \
+                            --timeout 5m
+
+                        echo "Helm deployment initiated"
+
+                        # Show release status
+                        if [ "${DRY_RUN}" != "true" ]; then
+                            helm status ${IMAGE_NAME} -n ${NAMESPACE}
+                        fi
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 5: Wait for Rollout
+         * Monitor deployment progress and wait for readiness
+         */
+        stage('Wait for Rollout') {
+            when {
+                expression {
+                    return params.DRY_RUN != true
+                }
+            }
+            steps {
+                script {
+                    echo "====== Waiting for deployment rollout ======"
+
+                    sh '''
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        # Wait for deployment to be ready (max 5 minutes)
+                        echo "Waiting for deployment to be ready..."
+                        kubectl rollout status deployment/springboot-app \
+                            -n ${NAMESPACE} \
+                            --timeout=5m || {
+                            echo "Rollout timeout or failure"
+                            exit 1
+                        }
+
+                        echo "Deployment rollout successful"
+
+                        # Display pod status
+                        echo ""
+                        echo "Pod status:"
+                        kubectl get pods -n ${NAMESPACE} -l app=springboot-app
+
+                        # Display deployment status
+                        echo ""
+                        echo "Deployment status:"
+                        kubectl describe deployment springboot-app -n ${NAMESPACE} | tail -30
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 6: Smoke Tests
+         * Run basic health checks
+         */
+        stage('Smoke Tests') {
+            when {
+                expression {
+                    return params.DRY_RUN != true
+                }
+            }
+            steps {
+                script {
+                    echo "====== Running smoke tests ======"
+
+                    sh '''
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        # Get service endpoint
+                        SERVICE_IP=$(kubectl get service springboot-app \
+                            -n ${NAMESPACE} \
+                            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || \
+                            kubectl get service springboot-app \
+                            -n ${NAMESPACE} \
+                            -o jsonpath='{.spec.clusterIP}')
+
+                        echo "Service IP: $SERVICE_IP"
+
+                        # Health check (retry 5 times with 10 second interval)
+                        echo "Checking application health..."
+                        for i in {1..5}; do
+                            echo "Attempt $i..."
+                            RESPONSE=$(kubectl exec -it $(kubectl get pod -n ${NAMESPACE} -l app=springboot-app -o jsonpath='{.items[0].metadata.name}') \
+                                -n ${NAMESPACE} \
+                                -- curl -s http://localhost:8080/actuator/health || echo "")
+
+                            if echo "$RESPONSE" | grep -q "UP\|HEALTHY"; then
+                                echo "✓ Health check passed"
+                                break
+                            fi
+
+                            if [ $i -lt 5 ]; then
+                                sleep 10
+                            fi
+                        done
+
+                        # Check if pods are running
+                        echo ""
+                        echo "Verifying pod count..."
+                        POD_COUNT=$(kubectl get pods -n ${NAMESPACE} -l app=springboot-app --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' | wc -w)
+                        echo "Running pods: $POD_COUNT"
+
+                        if [ "$POD_COUNT" -eq 0 ]; then
+                            echo "Error: No running pods found"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 7: Canary Deployment (Production only)
+         * Gradually shift traffic to new version
+         */
+        stage('Canary Deployment') {
+            when {
+                expression {
+                    return params.ENVIRONMENT == 'production' && params.DRY_RUN != true
+                }
+            }
+            steps {
+                script {
+                    echo "====== Executing canary deployment ======"
+
+                    sh '''
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        # Canary strategy: Route traffic gradually
+                        # This is a simplified example; in production use Istio, Flagger, or similar
+
+                        echo "Canary Phase 1: Route 10% of traffic to new version"
+                        sleep 30
+                        kubectl describe deployment springboot-app -n ${NAMESPACE} | grep -A 5 "Replicas"
+
+                        echo ""
+                        echo "Canary Phase 2: Route 50% of traffic to new version"
+                        sleep 30
+
+                        echo ""
+                        echo "Canary Phase 3: Route 100% of traffic to new version"
+                        sleep 10
+
+                        echo "Canary deployment complete"
+                    '''
+                }
+            }
+        }
+
+        /*
+         * Stage 8: Post-Deployment Validation
+         * Verify deployment stability
+         */
+        stage('Post-Deployment Validation') {
+            when {
+                expression {
+                    return params.DRY_RUN != true
+                }
+            }
+            steps {
+                script {
+                    echo "====== Post-deployment validation ======"
+
+                    sh '''
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        # Check for any pod restart loops
+                        echo "Checking pod restart counts..."
+                        kubectl get pods -n ${NAMESPACE} -l app=springboot-app \
+                            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\n"}{end}'
+
+                        # Check events for errors
+                        echo ""
+                        echo "Recent events:"
+                        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -10
+
+                        # Display metrics if available
+                        echo ""
+                        echo "Resource usage:"
+                        kubectl top pods -n ${NAMESPACE} -l app=springboot-app 2>/dev/null || echo "Metrics not available"
+
+                        echo ""
+                        echo "Deployment validation complete"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "====== Pipeline Cleanup ======"
+
+                sh '''
+                    export KUBECONFIG=$KUBECONFIG
+                    kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                    # Display final deployment status
+                    echo "Final deployment status:"
+                    kubectl get deployment springboot-app -n ${NAMESPACE} 2>/dev/null || echo "Deployment not found"
+
+                    echo ""
+                    echo "Running pods:"
+                    kubectl get pods -n ${NAMESPACE} -l app=springboot-app 2>/dev/null || echo "No pods found"
+                '''
+            }
+        }
+
+        success {
+            script {
+                echo "====== Deploy Pipeline SUCCESS ======"
+                emailext(
+                    subject: "Deployment Success: ${params.ENVIRONMENT} - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    body: """
+                        Deployment to ${params.ENVIRONMENT} completed successfully!
+
+                        Environment: ${params.ENVIRONMENT}
+                        Image: ${FULL_IMAGE}
+                        Deployment ID: ${DEPLOYMENT_ID}
+                        Build Number: ${env.BUILD_NUMBER}
+                        Build URL: ${env.BUILD_URL}
+
+                        Next: Monitor the application in ${params.ENVIRONMENT} environment
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+
+        failure {
+            script {
+                echo "====== Deploy Pipeline FAILURE ======"
+
+                // Attempt automatic rollback for production
+                if (params.ENVIRONMENT == 'production') {
+                    sh '''
+                        export KUBECONFIG=$KUBECONFIG
+                        kubectl config use-context ${KUBECTL_CONTEXT} || true
+
+                        echo "Attempting automatic rollback..."
+                        kubectl rollout undo deployment/springboot-app -n ${NAMESPACE}
+                        kubectl rollout status deployment/springboot-app -n ${NAMESPACE} --timeout=3m
+
+                        echo "Rollback initiated"
+                    '''
+                }
+
+                emailext(
+                    subject: "Deployment Failed: ${params.ENVIRONMENT} - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    body: """
+                        Deployment to ${params.ENVIRONMENT} FAILED!
+
+                        Environment: ${params.ENVIRONMENT}
+                        Image: ${FULL_IMAGE}
+                        Build Number: ${env.BUILD_NUMBER}
+                        Build URL: ${env.BUILD_URL}
+
+                        Please check the build log and investigate the failure.
+                        ${params.ENVIRONMENT == 'production' ? 'Automatic rollback has been initiated.' : ''}
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+    }
+}

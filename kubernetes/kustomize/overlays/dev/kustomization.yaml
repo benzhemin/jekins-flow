@@ -1,0 +1,41 @@
+# Development Environment Overlay
+#
+# Patches the base Kustomization with development-specific values:
+# - 1 replica for minimal resource usage
+# - Reduced resource limits
+# - Internal DNS only
+# - Debug logging enabled
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dev
+
+bases:
+  - ../../base
+
+# Namespace-specific labels
+commonLabels:
+  environment: dev
+
+# Patches for development
+patchesStrategicMerge:
+  - deployment-patch.yaml
+
+# Image overrides for dev
+images:
+  - name: springboot-app
+    newTag: dev-latest
+
+# Replica override (scale down for dev)
+replicas:
+  - name: springboot-app
+    count: 1
+
+# Environment variables specific to dev
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - SPRING_PROFILES_ACTIVE=dev
+      - LOGGING_LEVEL_COM_COMPANY=DEBUG

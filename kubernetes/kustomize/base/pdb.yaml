@@ -1,0 +1,17 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: springboot-app
+  labels:
+    app: springboot-app
+spec:
+  # Ensure at least 1 pod is always available
+  minAvailable: 1
+
+  selector:
+    matchLabels:
+      app: springboot-app
+      component: api
+
+  # Unhealthy pod eviction policy
+  unhealthyPodEvictionPolicy: AlwaysAllow

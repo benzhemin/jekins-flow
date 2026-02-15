@@ -1,0 +1,36 @@
+# Staging Environment Overlay
+#
+# Patches the base Kustomization with staging-specific values:
+# - 2 replicas for HA testing
+# - Medium resource limits
+# - Load balancer service
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: staging
+
+bases:
+  - ../../base
+
+commonLabels:
+  environment: staging
+
+patchesStrategicMerge:
+  - deployment-patch.yaml
+  - service-patch.yaml
+
+images:
+  - name: springboot-app
+    newTag: staging-latest
+
+replicas:
+  - name: springboot-app
+    count: 2
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - SPRING_PROFILES_ACTIVE=staging
+      - LOGGING_LEVEL_COM_COMPANY=INFO

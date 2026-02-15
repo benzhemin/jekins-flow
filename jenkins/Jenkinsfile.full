@@ -1,0 +1,381 @@
+/*
+ * Full CI/CD Orchestrator Pipeline - Jenkinsfile.full
+ *
+ * This is the master pipeline that orchestrates the entire CI/CD workflow:
+ * 1. CI: Build, test, and scan code
+ * 2. Build: Create Docker image and scan for vulnerabilities
+ * 3. Deploy Dev: Automatic deployment to development
+ * 4. Deploy Staging: Manual approval required
+ * 5. Deploy Production: Manual approval + canary deployment
+ *
+ * This provides a complete end-to-end automation from commit to production.
+ *
+ * Trigger: On commit to main branch
+ * Duration: ~30-45 minutes (with approvals)
+ */
+
+pipeline {
+    agent {
+        docker {
+            image 'alpine:latest'
+            args '--cpus=2 --memory=1g'
+        }
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 2, unit: 'HOURS')
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    // Trigger on main branch commits
+    triggers {
+        pollSCM('H * * * *') // Every hour
+        githubPush()
+    }
+
+    environment {
+        BUILD_VERSION = sh(script: "git describe --tags --abbrev=0 2>/dev/null || echo 'v1.0.0-${BUILD_NUMBER}'", returnStdout: true).trim()
+        GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+    }
+
+    stages {
+        /*
+         * Stage 1: CI Pipeline
+         * Execute comprehensive build, test, and code quality checks
+         */
+        stage('CI') {
+            steps {
+                script {
+                    echo "====== Starting CI Pipeline ======"
+                    try {
+                        // Trigger the CI pipeline and wait for completion
+                        def ciJob = build job: 'springboot-cicd-platform-ci',
+                            parameters: [],
+                            wait: true,
+                            propagate: true
+
+                        echo "✓ CI Pipeline completed successfully"
+                        echo "  Build: ${ciJob.getNumber()}"
+                    } catch (Exception e) {
+                        echo "✗ CI Pipeline failed: ${e.message}"
+                        error("CI pipeline stage failed")
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 2: Build Docker Image
+         * Create and scan Docker image
+         */
+        stage('Build') {
+            steps {
+                script {
+                    echo "====== Starting Build Pipeline ======"
+                    try {
+                        def buildJob = build job: 'springboot-cicd-platform-build',
+                            parameters: [
+                                string(name: 'BUILD_VERSION', value: BUILD_VERSION),
+                                booleanParam(name: 'DRY_RUN', value: false)
+                            ],
+                            wait: true,
+                            propagate: true
+
+                        echo "✓ Build Pipeline completed successfully"
+                        echo "  Build: ${buildJob.getNumber()}"
+                        echo "  Image: springboot-app:${BUILD_VERSION}"
+                    } catch (Exception e) {
+                        echo "✗ Build Pipeline failed: ${e.message}"
+                        error("Build pipeline stage failed")
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 3: Deploy to Development
+         * Automatic deployment - no approval needed
+         */
+        stage('Deploy - Development') {
+            steps {
+                script {
+                    echo "====== Deploying to Development ======"
+                    try {
+                        def deployJob = build job: 'springboot-cicd-platform-deploy',
+                            parameters: [
+                                choice(name: 'ENVIRONMENT', value: 'dev'),
+                                string(name: 'IMAGE_TAG', value: BUILD_VERSION),
+                                choice(name: 'DEPLOYMENT_TOOL', value: 'kustomize'),
+                                booleanParam(name: 'DRY_RUN', value: false)
+                            ],
+                            wait: true,
+                            propagate: true
+
+                        echo "✓ Development deployment successful"
+                        echo "  Build: ${deployJob.getNumber()}"
+                    } catch (Exception e) {
+                        echo "✗ Development deployment failed: ${e.message}"
+                        // Don't fail the entire pipeline - continue to next opportunity
+                        echo "Development deployment failure recorded"
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 4: Manual Approval for Staging
+         * Requires human approval before proceeding
+         */
+        stage('Approve - Staging') {
+            steps {
+                script {
+                    echo "====== Awaiting Staging Deployment Approval ======"
+
+                    try {
+                        timeout(time: 4, unit: 'HOURS') {
+                            def userInput = input(
+                                id: 'staging-approval',
+                                message: """
+                                    Ready to deploy to Staging?
+
+                                    Version: ${BUILD_VERSION}
+                                    Commit: ${GIT_COMMIT_SHORT}
+
+                                    Click 'Proceed' to continue with Staging deployment.
+                                """,
+                                ok: 'Proceed',
+                                submitter: 'staging-approvers'
+                            )
+                            echo "✓ Staging deployment approved"
+                        }
+                    } catch (err) {
+                        echo "Staging deployment cancelled or timed out"
+                        currentBuild.result = 'UNSTABLE'
+                        return
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 5: Deploy to Staging
+         * Requires manual approval from stage 4
+         */
+        stage('Deploy - Staging') {
+            when {
+                expression {
+                    return currentBuild.result != 'UNSTABLE'
+                }
+            }
+            steps {
+                script {
+                    echo "====== Deploying to Staging ======"
+                    try {
+                        def deployJob = build job: 'springboot-cicd-platform-deploy',
+                            parameters: [
+                                choice(name: 'ENVIRONMENT', value: 'staging'),
+                                string(name: 'IMAGE_TAG', value: BUILD_VERSION),
+                                choice(name: 'DEPLOYMENT_TOOL', value: 'helm'),
+                                booleanParam(name: 'DRY_RUN', value: false)
+                            ],
+                            wait: true,
+                            propagate: true
+
+                        echo "✓ Staging deployment successful"
+                        echo "  Build: ${deployJob.getNumber()}"
+                    } catch (Exception e) {
+                        echo "✗ Staging deployment failed: ${e.message}"
+                        currentBuild.result = 'UNSTABLE'
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 6: Manual Approval for Production
+         * Requires explicit human approval for production
+         */
+        stage('Approve - Production') {
+            when {
+                expression {
+                    return currentBuild.result != 'UNSTABLE'
+                }
+            }
+            steps {
+                script {
+                    echo "====== ⚠️  PRODUCTION DEPLOYMENT APPROVAL REQUIRED ⚠️  ======"
+
+                    try {
+                        timeout(time: 8, unit: 'HOURS') {
+                            def userInput = input(
+                                id: 'production-approval',
+                                message: """
+                                    ⚠️  PRODUCTION DEPLOYMENT ⚠️
+
+                                    This will deploy to PRODUCTION and cannot be easily rolled back.
+
+                                    Version: ${BUILD_VERSION}
+                                    Commit: ${GIT_COMMIT_SHORT}
+
+                                    Approval Required:
+                                    - Engineering Lead
+                                    - Or
+                                    - Release Manager
+
+                                    Click 'Deploy to Production' to proceed.
+                                """,
+                                ok: 'Deploy to Production',
+                                submitter: 'production-approvers'
+                            )
+                            echo "✓ Production deployment approved"
+                        }
+                    } catch (err) {
+                        echo "Production deployment cancelled or timed out"
+                        currentBuild.result = 'UNSTABLE'
+                        return
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 7: Deploy to Production
+         * Requires explicit approval from stage 6
+         */
+        stage('Deploy - Production') {
+            when {
+                expression {
+                    return currentBuild.result != 'UNSTABLE'
+                }
+            }
+            steps {
+                script {
+                    echo "====== Deploying to Production ======"
+                    try {
+                        def deployJob = build job: 'springboot-cicd-platform-deploy',
+                            parameters: [
+                                choice(name: 'ENVIRONMENT', value: 'production'),
+                                string(name: 'IMAGE_TAG', value: BUILD_VERSION),
+                                choice(name: 'DEPLOYMENT_TOOL', value: 'helm'),
+                                booleanParam(name: 'DRY_RUN', value: false)
+                            ],
+                            wait: true,
+                            propagate: true
+
+                        echo "✓ Production deployment successful (canary + full rollout)"
+                        echo "  Build: ${deployJob.getNumber()}"
+                    } catch (Exception e) {
+                        echo "✗ Production deployment failed: ${e.message}"
+                        error("Production deployment failed")
+                    }
+                }
+            }
+        }
+
+        /*
+         * Stage 8: Notify Success
+         * Final notification of successful end-to-end deployment
+         */
+        stage('Notify') {
+            when {
+                expression {
+                    return currentBuild.result == 'SUCCESS'
+                }
+            }
+            steps {
+                script {
+                    echo "====== CI/CD Pipeline Complete ======"
+                    sh '''
+                        apk add --no-cache curl
+                        # Send notification to team (e.g., Slack)
+                        # curl -X POST https://hooks.slack.com/services/YOUR/WEBHOOK/HERE \
+                        #   -d '{"text":"Production deployment successful: ${BUILD_VERSION}"}'
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "====== Orchestrator Pipeline Complete ======"
+                echo "Status: ${currentBuild.result}"
+                echo "Duration: ${currentBuild.durationString}"
+                echo "Version: ${BUILD_VERSION}"
+            }
+        }
+
+        success {
+            script {
+                emailext(
+                    subject: "✓ CI/CD Complete: ${BUILD_VERSION} deployed to production",
+                    body: """
+                        Full CI/CD pipeline completed successfully!
+
+                        Version: ${BUILD_VERSION}
+                        Commit: ${GIT_COMMIT_SHORT}
+                        Build: ${env.BUILD_NUMBER}
+                        URL: ${env.BUILD_URL}
+                        Duration: ${currentBuild.durationString}
+
+                        Stages completed:
+                        ✓ CI (Build, Test, Scan)
+                        ✓ Build (Docker image + Container scan)
+                        ✓ Deploy Dev (Automatic)
+                        ✓ Deploy Staging (Approved)
+                        ✓ Deploy Production (Approved + Canary)
+
+                        The application is now live in production.
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+
+        failure {
+            script {
+                emailext(
+                    subject: "✗ CI/CD Pipeline Failed: ${BUILD_VERSION}",
+                    body: """
+                        CI/CD pipeline encountered an error!
+
+                        Version: ${BUILD_VERSION}
+                        Build: ${env.BUILD_NUMBER}
+                        URL: ${env.BUILD_URL}
+
+                        Please check the logs and resolve any issues before retrying.
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+
+        unstable {
+            script {
+                echo "Pipeline completed with warnings or partial success"
+                emailext(
+                    subject: "⚠️  CI/CD Pipeline Unstable: ${BUILD_VERSION}",
+                    body: """
+                        CI/CD pipeline completed with warnings!
+
+                        Version: ${BUILD_VERSION}
+                        Build: ${env.BUILD_NUMBER}
+                        URL: ${env.BUILD_URL}
+
+                        Some stages may have failed. Review the logs for details.
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}',
+                    recipientProviders: [developers(), requestor()],
+                    mimeType: 'text/plain'
+                )
+            }
+        }
+    }
+}

@@ -1,0 +1,62 @@
+# Gradle
+.gradle/
+build/
+gradle/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Application
+application/*/build/
+*.jar
+*.war
+
+# Kubernetes
+kubeconfig
+kubeconfig.local
+
+# Docker
+docker-compose.override.yml
+
+# Test coverage
+coverage/
+*.coverage
+
+# Maven (if used)
+target/
+.m2/
+
+# Node/npm
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store

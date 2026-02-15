@@ -1,0 +1,153 @@
+# Default Helm values for Spring Boot Application
+# These values can be overridden at install/upgrade time or with environment-specific files
+
+# Global settings
+global:
+  environment: dev
+
+# Deployment configuration
+deployment:
+  replicaCount: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+# Image configuration
+image:
+  repository: springboot-app
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+# ImagePullSecrets for private registries
+imagePullSecrets: []
+
+# Service Account
+serviceAccount:
+  create: true
+  name: springboot-app
+  annotations: {}
+
+# Pod annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+      - ALL
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: springboot-app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+# Autoscaling configuration
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Probes
+probes:
+  startup:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+
+  liveness:
+    enabled: true
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readiness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+# Affinity rules
+affinity:
+  podAntiAffinity: "preferred"
+  nodeAffinity: {}
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Termination grace period
+terminationGracePeriodSeconds: 30
+
+# Environment variables
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "helm"
+  - name: LOGGING_LEVEL_ROOT
+    value: "INFO"
+
+# Environment from ConfigMap
+envFrom: []
+
+# Secrets
+secrets:
+  enabled: false
+  name: app-secrets
+
+# ConfigMap
+configMap:
+  enabled: true
+  data:
+    SPRING_JPA_HIBERNATE_DDL_AUTO: "validate"
+    SPRING_JPA_SHOW_SQL: "false"
+    MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: "health,info,metrics,prometheus"

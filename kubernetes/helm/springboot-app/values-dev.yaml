@@ -1,0 +1,26 @@
+# Development environment overrides
+global:
+  environment: dev
+
+deployment:
+  replicaCount: 1
+
+image:
+  tag: "dev-latest"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 200m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "dev"
+  - name: LOGGING_LEVEL_COM_COMPANY
+    value: "DEBUG"

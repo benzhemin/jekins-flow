@@ -1,0 +1,47 @@
+# Kustomization Base Configuration
+#
+# This file defines the base Kubernetes resources that are used across
+# all environments (dev, staging, production). It includes:
+# - Deployment
+# - Service
+# - ConfigMap
+# - HorizontalPodAutoscaler
+# - PodDisruptionBudget
+#
+# Each environment creates an overlay that patches these base resources
+# with environment-specific values (replicas, resources, etc.)
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+# Metadata applied to all resources
+commonLabels:
+  app: springboot-app
+  version: 1.0.0
+
+commonAnnotations:
+  description: "Spring Boot CI/CD Platform - Multi-environment deployment"
+  documentation: "https://github.com/company/springboot-cicd-platform"
+
+# Resources to include
+resources:
+  - deployment.yaml
+  - service.yaml
+  - configmap.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+# Image replacement (overridden in overlays)
+images:
+  - name: springboot-app
+    newName: springboot-app
+    newTag: latest
+
+# Common environment variables (can be overridden in overlays)
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - SPRING_PROFILES_ACTIVE=kustomize

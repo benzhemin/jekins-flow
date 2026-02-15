@@ -1,0 +1,63 @@
+# Docker Compose for Local Development Environment
+#
+# This file sets up a complete local development environment with:
+# - Spring Boot application
+# - PostgreSQL database
+# - H2 console (for development database inspection)
+#
+# Usage:
+#   docker-compose up
+#   docker-compose down
+#
+
+version: '3.8'
+
+services:
+  # Spring Boot Application
+  app:
+    image: springboot-app:local
+    build:
+      context: ../..
+      dockerfile: application/docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:h2:mem:testdb
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.h2.Driver
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.H2Dialect
+      SPRING_H2_CONSOLE_ENABLED: "true"
+      LOGGING_LEVEL_ROOT: INFO
+      LOGGING_LEVEL_COM_COMPANY: DEBUG
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL Database (optional, for production-like setup)
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: springboot_db
+      POSTGRES_USER: springboot_user
+      POSTGRES_PASSWORD: springboot_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U springboot_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  default:
+    name: springboot-network
