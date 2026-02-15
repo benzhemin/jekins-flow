@@ -1,0 +1,15 @@
+/*
+ * Application subproject settings
+ * This file defines the application-specific module hierarchy
+ */
+
+rootProject.name = "application"
+
+// Enable version catalog
+enableFeaturePreview('VERSION_CATALOGS')
+
+// Include all application modules
+include 'common'
+include 'domain'
+include 'infrastructure'
+include 'api'

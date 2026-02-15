@@ -1,0 +1,56 @@
+/*
+ * Application root build configuration
+ * Defines shared build logic for all application modules
+ */
+
+plugins {
+    id 'java'
+    id 'org.sonarqube' version '4.4.1.3373'
+    id 'org.owasp.dependencycheck' version '9.0.9'
+}
+
+// Apply Spring Boot plugin and dependency management to subprojects
+subprojects {
+    apply plugin: 'org.springframework.boot'
+    apply plugin: 'io.spring.dependency-management'
+    apply plugin: 'java'
+    apply plugin: 'org.sonarqube'
+    apply plugin: 'org.owasp.dependencycheck'
+
+    dependencies {
+        // Lombok for reducing boilerplate
+        compileOnly libs.lombok
+        annotationProcessor libs.lombok
+        testCompileOnly libs.lombok
+        testAnnotationProcessor libs.lombok
+
+        // Logging (included by Spring Boot starter)
+        implementation libs.bundles.'spring-boot-common'
+
+        // Testing
+        testImplementation libs.'spring-boot-starter-test'
+        testImplementation libs.'junit-jupiter-api'
+        testRuntimeOnly libs.'junit-jupiter-engine'
+        testImplementation libs.'mockito-core'
+    }
+
+    // SonarQube configuration
+    sonarqube {
+        properties {
+            property 'sonar.projectKey', 'springboot-cicd-platform'
+            property 'sonar.projectName', 'Spring Boot CI/CD Platform'
+            property 'sonar.projectVersion', project.version
+            property 'sonar.sourceEncoding', 'UTF-8'
+            property 'sonar.java.source', '17'
+            property 'sonar.coverage.jacoco.xmlReportPaths', 'build/reports/jacoco/test/jacocoTestReport.xml'
+        }
+    }
+
+    // OWASP Dependency-Check configuration
+    dependencyCheck {
+        format = org.owasp.dependencycheck.gradle.extension.DependencyCheckExtension.Format.ALL
+        analyzers = ['GRADLE']
+        failOnError = false
+        suppressionFile = "${rootDir}/security/owasp/suppressions.xml"
+    }
+}

@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(./gradlew:*)",
+      "Bash(chmod:*)",
+      "Bash(cat:*)"
     ]
   }
 }

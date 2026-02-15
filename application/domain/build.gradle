@@ -1,0 +1,25 @@
+/*
+ * Domain Module Build Configuration
+ * This module contains the business logic and domain services
+ * It depends on the common module for shared utilities
+ */
+
+plugins {
+    id 'java-library-conventions'
+}
+
+description = 'Business logic and domain services'
+
+dependencies {
+    // Depend on common module
+    api project(':application:common')
+
+    // Spring Boot starters for domain logic
+    implementation libs.'spring-boot-starter-validation'
+    implementation libs.'spring-boot-starter-logging'
+    implementation libs.lombok
+    annotationProcessor libs.lombok
+
+    // Testing
+    testImplementation libs.'mockito-core'
+}
